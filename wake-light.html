@@ -1,0 +1,324 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, maximum-scale=1.0, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>Wake Light</title>
+<style>
+  :root { --hue: 270; --sat: 70%; --nhue: 40; --nsat: 85%; }
+  * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html { height: 100%; }
+  body { min-height: 100%; overflow-y: auto; -webkit-overflow-scrolling: touch; }
+  body {
+    background: #000; color: #e8e6ef;
+    font-family: ui-rounded, "SF Pro Rounded", -apple-system, system-ui, sans-serif;
+    display: flex; align-items: flex-start; justify-content: center;
+    padding: calc(env(safe-area-inset-top) + 24px) env(safe-area-inset-right) calc(env(safe-area-inset-bottom) + 24px) env(safe-area-inset-left);
+    user-select: none; -webkit-user-select: none;
+  }
+
+  /* Overnight ambient glow: oversized warm field that slowly drifts so no pixel stays static */
+  #night {
+    position: fixed; inset: -25%;
+    background: radial-gradient(circle at 50% 45%,
+      hsl(var(--nhue), var(--nsat), 58%) 0%, hsl(var(--nhue), var(--nsat), 40%) 45%, hsl(var(--nhue), var(--nsat), 22%) 100%);
+    opacity: 0;
+    transition: opacity 1.4s linear;
+    pointer-events: none; z-index: 1;
+    animation: drift 84s ease-in-out infinite alternate;
+    will-change: transform, filter;
+  }
+  @keyframes drift {
+    0%   { transform: translate(-7%, -5%) scale(1.05); filter: brightness(0.82); }
+    50%  { transform: translate(5%, 6%)  scale(1.13); filter: brightness(1.12); }
+    100% { transform: translate(-3%, 7%) scale(1.06); filter: brightness(0.88); }
+  }
+  @media (prefers-reduced-motion: reduce) { #night { animation: none; } }
+
+  /* Wake light: fades up to the chosen color at the set time */
+  #light {
+    position: fixed; inset: 0;
+    background: hsl(var(--hue), var(--sat), 55%);
+    opacity: 0; transition: opacity 1.2s linear;
+    pointer-events: none; z-index: 2;
+  }
+
+  #panel {
+    position: relative; z-index: 5;
+    width: min(440px, 88vw);
+    background: #0d0d12; border: 1px solid #1d1d27;
+    border-radius: 28px; padding: 32px 30px 28px;
+  }
+  .eyebrow { font-size: 12px; letter-spacing: 0.18em; text-transform: uppercase; color: #6f6c84; font-weight: 600; margin-bottom: 6px; }
+  h1 { font-size: 26px; font-weight: 650; letter-spacing: -0.01em; margin-bottom: 26px; }
+  .field { margin-bottom: 22px; }
+  .field > label { display: block; font-size: 13px; color: #9a97b0; margin-bottom: 10px; font-weight: 500; }
+
+  input[type="time"] {
+    width: 100%; background: #15151d; border: 1px solid #25252f; color: #fff;
+    font-size: 42px; font-weight: 600; text-align: center; letter-spacing: 0.02em;
+    border-radius: 16px; padding: 14px 0; font-variant-numeric: tabular-nums;
+  }
+  input[type="time"]::-webkit-calendar-picker-indicator { filter: invert(0.6); }
+
+  .swatches { display: flex; gap: 10px; flex-wrap: wrap; }
+  .swatch { width: 44px; height: 44px; border-radius: 50%; border: 2px solid transparent; cursor: pointer; transition: transform 0.12s, border-color 0.12s; }
+  .swatch.active { border-color: #fff; transform: scale(1.08); }
+
+  .row { display: flex; align-items: center; gap: 14px; }
+  input[type="range"] { flex: 1; -webkit-appearance: none; height: 6px; border-radius: 3px; background: #25252f; }
+  input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; width: 26px; height: 26px; border-radius: 50%; background: #fff; cursor: pointer; }
+  .val { font-variant-numeric: tabular-nums; color: #c9c6db; font-size: 14px; min-width: 64px; text-align: right; }
+
+  #arm { width: 100%; margin-top: 6px; padding: 17px; border: none; border-radius: 16px; background: hsl(var(--hue), var(--sat), 55%); color: #fff; font-size: 17px; font-weight: 650; cursor: pointer; }
+  #arm:active { opacity: 0.85; }
+  .hint { font-size: 12.5px; color: #56546a; line-height: 1.5; margin-top: 4px; }
+
+  /* Armed layers cover the screen; tap reveals a control bar briefly */
+  #armed { position: fixed; inset: 0; z-index: 4; display: none; }
+  #armed.show { display: block; }
+  #tap { position: absolute; inset: 0; }
+  #bar {
+    position: absolute; left: 50%; bottom: 48px; transform: translateX(-50%);
+    display: flex; align-items: center; gap: 18px;
+    background: rgba(8,8,12,0.55); backdrop-filter: blur(12px);
+    border: 1px solid rgba(255,255,255,0.12); border-radius: 18px;
+    padding: 12px 18px; opacity: 0; transition: opacity 0.35s; pointer-events: none;
+  }
+  #bar.show { opacity: 1; pointer-events: auto; }
+  #clock { font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; color: #fff; }
+  #status { font-size: 13px; color: #b6b3c8; }
+  #end { padding: 9px 20px; border-radius: 11px; background: rgba(255,255,255,0.1); color: #fff; border: 1px solid rgba(255,255,255,0.18); font-size: 14px; cursor: pointer; }
+</style>
+</head>
+<body>
+  <div id="night"></div>
+  <div id="light"></div>
+
+  <div id="panel">
+    <div class="eyebrow">Wake Light</div>
+    <h1>Glow overnight, light up on time</h1>
+
+    <div class="field">
+      <label>Turn on at</label>
+      <input type="time" id="time" value="06:30">
+    </div>
+
+    <div class="field">
+      <label>Wake color</label>
+      <div class="swatches" id="swatches"></div>
+    </div>
+
+    <div class="field">
+      <label>Night glow color</label>
+      <div class="swatches" id="nswatches"></div>
+    </div>
+
+    <div class="field">
+      <label>Night glow brightness</label>
+      <div class="row">
+        <input type="range" id="glow" min="0" max="100" step="1" value="25">
+        <span class="val" id="glowVal">Dim</span>
+      </div>
+      <div class="hint">A faint, slowly drifting warm light through the night. Drift prevents burn-in. Set to Off for a black screen.</div>
+    </div>
+
+    <div class="field">
+      <label>Sunrise fade-in</label>
+      <div class="row">
+        <input type="range" id="fade" min="0" max="30" step="1" value="0">
+        <span class="val" id="fadeVal">Instant</span>
+      </div>
+      <div class="hint">How long the wake color takes to reach full brightness.</div>
+    </div>
+
+    <button id="arm">Arm</button>
+  </div>
+
+  <div id="armed">
+    <div id="tap"></div>
+    <div id="bar">
+      <div>
+        <div id="clock"></div>
+        <div id="status"></div>
+      </div>
+      <button id="end">End</button>
+    </div>
+  </div>
+
+<script>
+(function () {
+  const root = document.documentElement;
+  const panel = document.getElementById('panel');
+  const armedView = document.getElementById('armed');
+  const night = document.getElementById('night');
+  const light = document.getElementById('light');
+  const armBtn = document.getElementById('arm');
+  const endBtn = document.getElementById('end');
+  const tap = document.getElementById('tap');
+  const bar = document.getElementById('bar');
+  const timeInput = document.getElementById('time');
+  const glow = document.getElementById('glow');
+  const glowVal = document.getElementById('glowVal');
+  const fade = document.getElementById('fade');
+  const fadeVal = document.getElementById('fadeVal');
+  const clockEl = document.getElementById('clock');
+  const statusEl = document.getElementById('status');
+
+  const colors = [
+    { name: 'Purple', h: 270, s: 70 }, { name: 'Violet', h: 285, s: 65 },
+    { name: 'Indigo', h: 240, s: 60 }, { name: 'Sunrise', h: 22, s: 85 },
+    { name: 'Amber', h: 38, s: 88 },  { name: 'Teal', h: 175, s: 60 },
+    { name: 'Rose', h: 340, s: 65 },  { name: 'White', h: 0, s: 0 },
+  ];
+
+  let hue = 270, sat = 70;
+  let wakeLock = null, targetTs = null, tickTimer = null, armed = false, barTimer = null;
+
+  const nightColors = [
+    { name: 'Amber', h: 40, s: 85 }, { name: 'Yellow', h: 50, s: 90 },
+    { name: 'Warm white', h: 38, s: 22 }, { name: 'Peach', h: 24, s: 70 },
+    { name: 'Red', h: 4, s: 80 }, { name: 'Green', h: 130, s: 45 },
+  ];
+  const nsw = document.getElementById('nswatches');
+  nightColors.forEach((c, i) => {
+    const el = document.createElement('div');
+    el.className = 'swatch' + (i === 0 ? ' active' : '');
+    el.style.background = `hsl(${c.h}, ${c.s}%, 50%)`;
+    el.title = c.name;
+    el.addEventListener('click', () => {
+      nsw.querySelectorAll('.swatch').forEach(s => s.classList.remove('active'));
+      el.classList.add('active');
+      root.style.setProperty('--nhue', c.h);
+      root.style.setProperty('--nsat', c.s + '%');
+    });
+    nsw.appendChild(el);
+  });
+
+  const sw = document.getElementById('swatches');
+  colors.forEach((c, i) => {
+    const el = document.createElement('div');
+    el.className = 'swatch' + (i === 0 ? ' active' : '');
+    el.style.background = c.s === 0 ? '#f2f2f2' : `hsl(${c.h}, ${c.s}%, 55%)`;
+    el.title = c.name;
+    el.addEventListener('click', () => {
+      sw.querySelectorAll('.swatch').forEach(s => s.classList.remove('active'));
+      el.classList.add('active');
+      hue = c.h; sat = c.s;
+      root.style.setProperty('--hue', hue);
+      root.style.setProperty('--sat', sat + '%');
+    });
+    sw.appendChild(el);
+  });
+
+  function glowLabel(v) {
+    if (v === 0) return 'Off';
+    if (v <= 33) return 'Dim';
+    if (v <= 66) return 'Soft';
+    return 'Bright';
+  }
+  function glowOpacity() { return (+glow.value) / 100 * 0.32; }
+  glow.addEventListener('input', () => { glowVal.textContent = glowLabel(+glow.value); });
+
+  fade.addEventListener('input', () => { const v = +fade.value; fadeVal.textContent = v === 0 ? 'Instant' : v + ' min'; });
+
+  function nextOccurrence(hh, mm) {
+    const now = new Date(), t = new Date();
+    t.setHours(hh, mm, 0, 0);
+    if (t.getTime() <= now.getTime()) t.setDate(t.getDate() + 1);
+    return t.getTime();
+  }
+
+  async function requestWakeLock() {
+    try {
+      if ('wakeLock' in navigator) {
+        wakeLock = await navigator.wakeLock.request('screen');
+        wakeLock.addEventListener('release', () => { wakeLock = null; });
+        return true;
+      }
+    } catch (e) {}
+    return false;
+  }
+  document.addEventListener('visibilitychange', async () => {
+    if (armed && wakeLock === null && document.visibilityState === 'visible') await requestWakeLock();
+  });
+
+  function pad(n) { return String(n).padStart(2, '0'); }
+  function fmt(ms) {
+    if (ms < 0) ms = 0;
+    const s = Math.floor(ms / 1000), h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+    if (h > 0) return `${h}h ${pad(m)}m`;
+    if (m > 0) return `${m}m ${pad(sec)}s`;
+    return `${sec}s`;
+  }
+
+  function tick() {
+    const now = Date.now();
+    const fadeMs = (+fade.value) * 60000;
+    const startTs = targetTs, fullTs = targetTs + fadeMs;
+    const tNow = new Date();
+    clockEl.textContent = pad(tNow.getHours()) + ':' + pad(tNow.getMinutes());
+
+    if (now < startTs) {
+      night.style.opacity = glowOpacity().toFixed(3);
+      light.style.opacity = '0';
+      statusEl.textContent = 'Lights on in ' + fmt(startTs - now);
+    } else if (now < fullTs) {
+      const p = (now - startTs) / (fullTs - startTs);
+      light.style.transition = 'none';
+      light.style.opacity = p.toFixed(3);
+      night.style.opacity = (glowOpacity() * (1 - p)).toFixed(3);
+      statusEl.textContent = 'Good morning';
+    } else {
+      light.style.opacity = '1';
+      night.style.opacity = '0';
+      statusEl.textContent = 'Good morning';
+    }
+  }
+
+  function showBar() {
+    bar.classList.add('show');
+    clearTimeout(barTimer);
+    barTimer = setTimeout(() => bar.classList.remove('show'), 5000);
+  }
+
+  async function arm() {
+    const [hh, mm] = timeInput.value.split(':').map(Number);
+    if (Number.isNaN(hh)) return;
+    targetTs = nextOccurrence(hh, mm);
+    armed = true;
+    panel.style.display = 'none';
+    armedView.classList.add('show');
+    light.style.opacity = '0';
+    light.style.transition = (+fade.value === 0) ? 'opacity 0.8s linear' : 'none';
+    night.style.opacity = '0';
+    await requestWakeLock();
+    tick();
+    tickTimer = setInterval(tick, 1000);
+    showBar();
+    try { if (document.documentElement.requestFullscreen) await document.documentElement.requestFullscreen(); } catch (e) {}
+  }
+
+  function disarm() {
+    armed = false;
+    clearInterval(tickTimer);
+    clearTimeout(barTimer);
+    if (wakeLock) { wakeLock.release().catch(() => {}); wakeLock = null; }
+    armedView.classList.remove('show');
+    bar.classList.remove('show');
+    panel.style.display = 'block';
+    light.style.transition = 'opacity 0.6s linear';
+    light.style.opacity = '0';
+    night.style.opacity = '0';
+    try { if (document.fullscreenElement) document.exitFullscreen(); } catch (e) {}
+  }
+
+  armBtn.addEventListener('click', arm);
+  endBtn.addEventListener('click', disarm);
+  tap.addEventListener('click', showBar);
+})();
+</script>
+</body>
+</html>
