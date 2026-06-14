@@ -262,14 +262,18 @@
   soundVolRow.classList.add('disabled');
   vol.addEventListener('input', () => { volVal.textContent = vol.value + '%'; });
 
-  let audioCtx = null, noiseSource = null, noiseGain = null, noiseFading = false;
+  // Played through an HTML5 <audio> element, not the Web Audio API: media elements
+  // play through the iOS silent/mute switch, and start cleanly from the Arm tap gesture.
+  const SR = 44100;
+  let noiseEl = null, noiseUrl = null, noiseFading = false, volTimer = null;
   // Perceptual taper so the low end of the slider is finely adjustable; keeps full-scale gentle
-  function noiseTarget() { return Math.pow((+vol.value) / 100, 1.6) * 0.55; }
+  function noiseTarget() { return Math.pow((+vol.value) / 100, 1.6) * 0.5; }
+  function clamp01(v) { return v < 0 ? 0 : v > 1 ? 1 : v; }
 
-  function makeNoiseBuffer(ctx, type, seconds) {
-    const len = Math.floor(ctx.sampleRate * seconds);
-    const buf = ctx.createBuffer(1, len, ctx.sampleRate);
-    const out = buf.getChannelData(0);
+  // gain is baked into the samples because iOS Safari ignores element.volume set from JS
+  function makeNoiseData(type, seconds, gain) {
+    const len = Math.floor(SR * seconds);
+    const out = new Float32Array(len);
     if (type === 'pink') {
       // Paul Kellet's economy pink-noise filter
       let b0 = 0, b1 = 0, b2 = 0, b3 = 0, b4 = 0, b5 = 0, b6 = 0;
@@ -295,45 +299,67 @@
     } else {
       for (let i = 0; i < len; i++) out[i] = Math.random() * 2 - 1;
     }
-    return buf;
+    for (let i = 0; i < len; i++) out[i] *= gain;
+    return out;
   }
 
-  async function startNoise() {
+  // Encode mono Float32 samples to a 16-bit PCM WAV blob the <audio> element can loop
+  function encodeWav(samples) {
+    const len = samples.length;
+    const view = new DataView(new ArrayBuffer(44 + len * 2));
+    const str = (off, s) => { for (let i = 0; i < s.length; i++) view.setUint8(off + i, s.charCodeAt(i)); };
+    str(0, 'RIFF'); view.setUint32(4, 36 + len * 2, true); str(8, 'WAVE');
+    str(12, 'fmt '); view.setUint32(16, 16, true); view.setUint16(20, 1, true); view.setUint16(22, 1, true);
+    view.setUint32(24, SR, true); view.setUint32(28, SR * 2, true); view.setUint16(32, 2, true); view.setUint16(34, 16, true);
+    str(36, 'data'); view.setUint32(40, len * 2, true);
+    let off = 44;
+    for (let i = 0; i < len; i++) {
+      const s = Math.max(-1, Math.min(1, samples[i]));
+      view.setInt16(off, s < 0 ? s * 0x8000 : s * 0x7FFF, true); off += 2;
+    }
+    return new Blob([view], { type: 'audio/wav' });
+  }
+
+  function fadeVol(from, to, ms) {
+    if (!noiseEl) return;
+    clearInterval(volTimer);
+    const steps = Math.max(1, Math.round(ms / 50));
+    let i = 0;
+    noiseEl.volume = clamp01(from);
+    volTimer = setInterval(() => {
+      i++;
+      if (noiseEl) noiseEl.volume = clamp01(from + (to - from) * (i / steps));
+      if (i >= steps) { clearInterval(volTimer); if (to === 0 && noiseEl) { try { noiseEl.pause(); } catch (e) {} } }
+    }, 50);
+  }
+
+  // Called synchronously inside the Arm tap so iOS allows playback to begin
+  function startNoise() {
     if (soundType === 'off') return;
     try {
-      if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-      await audioCtx.resume();
       noiseFading = false;
-      noiseSource = audioCtx.createBufferSource();
-      noiseSource.buffer = makeNoiseBuffer(audioCtx, soundType, 8);
-      noiseSource.loop = true;
-      noiseGain = audioCtx.createGain();
-      noiseGain.gain.value = 0;
-      noiseSource.connect(noiseGain).connect(audioCtx.destination);
-      noiseSource.start();
-      noiseGain.gain.linearRampToValueAtTime(noiseTarget(), audioCtx.currentTime + 4);
+      // Loudness is baked into the samples (iOS ignores .volume); .volume only drives the fade envelopes
+      noiseUrl = URL.createObjectURL(encodeWav(makeNoiseData(soundType, 20, noiseTarget())));
+      noiseEl = new Audio(noiseUrl);
+      noiseEl.loop = true;
+      noiseEl.setAttribute('playsinline', '');
+      noiseEl.volume = 0;
+      noiseEl.play().then(() => fadeVol(0, 1, 4000)).catch(() => {});
     } catch (e) {}
   }
 
   // Cross-fade the sound away as the wake light rises; the noise belongs to the night
   function fadeOutNoise(seconds) {
-    if (!noiseGain || noiseFading) return;
+    if (!noiseEl || noiseFading) return;
     noiseFading = true;
-    try {
-      const t = audioCtx.currentTime;
-      noiseGain.gain.cancelScheduledValues(t);
-      noiseGain.gain.setValueAtTime(noiseGain.gain.value, t);
-      noiseGain.gain.linearRampToValueAtTime(0, t + seconds);
-      const src = noiseSource;
-      setTimeout(() => { try { src.stop(); } catch (e) {} }, seconds * 1000 + 500);
-    } catch (e) {}
+    fadeVol(noiseEl.volume, 0, seconds * 1000);
   }
 
   function stopNoise() {
     noiseFading = false;
-    if (noiseSource) { try { noiseSource.stop(); } catch (e) {} noiseSource = null; }
-    noiseGain = null;
-    if (audioCtx) audioCtx.suspend().catch(() => {});
+    clearInterval(volTimer);
+    if (noiseEl) { try { noiseEl.pause(); } catch (e) {} noiseEl.src = ''; noiseEl = null; }
+    if (noiseUrl) { URL.revokeObjectURL(noiseUrl); noiseUrl = null; }
   }
 
   function nextOccurrence(hh, mm) {
@@ -356,7 +382,7 @@
   document.addEventListener('visibilitychange', async () => {
     if (armed && document.visibilityState === 'visible') {
       if (wakeLock === null) await requestWakeLock();
-      if (audioCtx && audioCtx.state === 'suspended' && !noiseFading) audioCtx.resume().catch(() => {});
+      if (noiseEl && noiseEl.paused && !noiseFading) noiseEl.play().catch(() => {});
     }
   });
 
@@ -406,13 +432,13 @@
     if (Number.isNaN(hh)) return;
     targetTs = nextOccurrence(hh, mm);
     armed = true;
+    startNoise(); // must run inside the tap gesture, before any await, for iOS
     panel.style.display = 'none';
     armedView.classList.add('show');
     light.style.opacity = '0';
     light.style.transition = (+fade.value === 0) ? 'opacity 0.8s linear' : 'none';
     night.style.opacity = '0';
     await requestWakeLock();
-    await startNoise();
     tick();
     tickTimer = setInterval(tick, 1000);
     showBar();
