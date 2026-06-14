@@ -262,18 +262,16 @@
   soundVolRow.classList.add('disabled');
   vol.addEventListener('input', () => { volVal.textContent = vol.value + '%'; });
 
-  // Played through an HTML5 <audio> element, not the Web Audio API: media elements
-  // play through the iOS silent/mute switch, and start cleanly from the Arm tap gesture.
+  // Seamless looping via the Web Audio API: AudioBufferSourceNode.loop is sample-accurate
+  // (no gap, unlike HTML5 <audio loop> on iOS). A tiny silent media element flips the iOS
+  // audio session so this plays through the silent/mute switch.
   const SR = 44100;
-  let noiseEl = null, noiseUrl = null, noiseFading = false, volTimer = null;
+  let audioCtx = null, noiseSource = null, noiseGain = null, unlockEl = null, unlockUrl = null, noiseFading = false;
   // Perceptual taper so the low end of the slider is finely adjustable; keeps full-scale gentle
   function noiseTarget() { return Math.pow((+vol.value) / 100, 1.6) * 0.5; }
-  function clamp01(v) { return v < 0 ? 0 : v > 1 ? 1 : v; }
 
-  // gain is baked into the samples because iOS Safari ignores element.volume set from JS
-  function makeNoiseData(type, seconds, gain) {
-    const len = Math.floor(SR * seconds);
-    const out = new Float32Array(len);
+  function fillNoise(out, type) {
+    const len = out.length;
     if (type === 'pink') {
       // Paul Kellet's economy pink-noise filter
       let b0 = 0, b1 = 0, b2 = 0, b3 = 0, b4 = 0, b5 = 0, b6 = 0;
@@ -289,7 +287,7 @@
         b6 = w * 0.115926;
       }
     } else if (type === 'brown') {
-      // Leaky integrator: deep rumble, stays near zero so the loop seam is inaudible
+      // Leaky integrator: deep rumble that stays near zero
       let last = 0;
       for (let i = 0; i < len; i++) {
         const w = Math.random() * 2 - 1;
@@ -299,67 +297,79 @@
     } else {
       for (let i = 0; i < len; i++) out[i] = Math.random() * 2 - 1;
     }
-    for (let i = 0; i < len; i++) out[i] *= gain;
-    return out;
   }
 
-  // Encode mono Float32 samples to a 16-bit PCM WAV blob the <audio> element can loop
-  function encodeWav(samples) {
-    const len = samples.length;
-    const view = new DataView(new ArrayBuffer(44 + len * 2));
+  // Build a short silent WAV; playing it through a media element flips the iOS audio session
+  function silentWavUrl() {
+    const n = Math.floor(SR * 0.1);
+    const view = new DataView(new ArrayBuffer(44 + n * 2));
     const str = (off, s) => { for (let i = 0; i < s.length; i++) view.setUint8(off + i, s.charCodeAt(i)); };
-    str(0, 'RIFF'); view.setUint32(4, 36 + len * 2, true); str(8, 'WAVE');
+    str(0, 'RIFF'); view.setUint32(4, 36 + n * 2, true); str(8, 'WAVE');
     str(12, 'fmt '); view.setUint32(16, 16, true); view.setUint16(20, 1, true); view.setUint16(22, 1, true);
     view.setUint32(24, SR, true); view.setUint32(28, SR * 2, true); view.setUint16(32, 2, true); view.setUint16(34, 16, true);
-    str(36, 'data'); view.setUint32(40, len * 2, true);
-    let off = 44;
-    for (let i = 0; i < len; i++) {
-      const s = Math.max(-1, Math.min(1, samples[i]));
-      view.setInt16(off, s < 0 ? s * 0x8000 : s * 0x7FFF, true); off += 2;
-    }
-    return new Blob([view], { type: 'audio/wav' });
-  }
-
-  function fadeVol(from, to, ms) {
-    if (!noiseEl) return;
-    clearInterval(volTimer);
-    const steps = Math.max(1, Math.round(ms / 50));
-    let i = 0;
-    noiseEl.volume = clamp01(from);
-    volTimer = setInterval(() => {
-      i++;
-      if (noiseEl) noiseEl.volume = clamp01(from + (to - from) * (i / steps));
-      if (i >= steps) { clearInterval(volTimer); if (to === 0 && noiseEl) { try { noiseEl.pause(); } catch (e) {} } }
-    }, 50);
+    str(36, 'data'); view.setUint32(40, n * 2, true); // samples left zero = silence
+    return URL.createObjectURL(new Blob([view], { type: 'audio/wav' }));
   }
 
   // Called synchronously inside the Arm tap so iOS allows playback to begin
   function startNoise() {
     if (soundType === 'off') return;
     try {
+      // Unlock the audio session via a silent media element (bypasses the iOS mute switch)
+      if (!unlockEl) {
+        unlockUrl = silentWavUrl();
+        unlockEl = new Audio(unlockUrl);
+        unlockEl.loop = true;
+        unlockEl.setAttribute('playsinline', '');
+      }
+      unlockEl.play().catch(() => {});
+
+      if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      audioCtx.resume();
       noiseFading = false;
-      // Loudness is baked into the samples (iOS ignores .volume); .volume only drives the fade envelopes
-      noiseUrl = URL.createObjectURL(encodeWav(makeNoiseData(soundType, 20, noiseTarget())));
-      noiseEl = new Audio(noiseUrl);
-      noiseEl.loop = true;
-      noiseEl.setAttribute('playsinline', '');
-      noiseEl.volume = 0;
-      noiseEl.play().then(() => fadeVol(0, 1, 4000)).catch(() => {});
+
+      const buf = audioCtx.createBuffer(1, Math.floor(audioCtx.sampleRate * 8), audioCtx.sampleRate);
+      const d = buf.getChannelData(0);
+      fillNoise(d, soundType);
+      // Crossfade the tail into the head so the loop seam is continuous (kills any click on brown/pink)
+      const cf = Math.min(Math.floor(buf.length / 4), Math.floor(buf.sampleRate * 0.05));
+      for (let i = 0; i < cf; i++) { const a = i / cf; d[i] = d[buf.length - cf + i] * (1 - a) + d[i] * a; }
+
+      noiseSource = audioCtx.createBufferSource();
+      noiseSource.buffer = buf;
+      noiseSource.loop = true;
+      noiseSource.loopStart = 0;
+      noiseSource.loopEnd = (buf.length - cf) / buf.sampleRate;
+      noiseGain = audioCtx.createGain();
+      noiseGain.gain.value = 0;
+      noiseSource.connect(noiseGain).connect(audioCtx.destination);
+      noiseSource.start();
+      const t = audioCtx.currentTime;
+      noiseGain.gain.setValueAtTime(0, t);
+      noiseGain.gain.linearRampToValueAtTime(noiseTarget(), t + 4);
     } catch (e) {}
   }
 
   // Cross-fade the sound away as the wake light rises; the noise belongs to the night
   function fadeOutNoise(seconds) {
-    if (!noiseEl || noiseFading) return;
+    if (!noiseGain || noiseFading) return;
     noiseFading = true;
-    fadeVol(noiseEl.volume, 0, seconds * 1000);
+    try {
+      const t = audioCtx.currentTime;
+      noiseGain.gain.cancelScheduledValues(t);
+      noiseGain.gain.setValueAtTime(noiseGain.gain.value, t);
+      noiseGain.gain.linearRampToValueAtTime(0, t + seconds);
+      const src = noiseSource;
+      setTimeout(() => { try { src.stop(); } catch (e) {} }, seconds * 1000 + 500);
+    } catch (e) {}
   }
 
   function stopNoise() {
     noiseFading = false;
-    clearInterval(volTimer);
-    if (noiseEl) { try { noiseEl.pause(); } catch (e) {} noiseEl.src = ''; noiseEl = null; }
-    if (noiseUrl) { URL.revokeObjectURL(noiseUrl); noiseUrl = null; }
+    if (noiseSource) { try { noiseSource.stop(); } catch (e) {} noiseSource = null; }
+    noiseGain = null;
+    if (unlockEl) { try { unlockEl.pause(); } catch (e) {} }
+    if (audioCtx) audioCtx.suspend().catch(() => {});
   }
 
   function nextOccurrence(hh, mm) {
@@ -382,7 +392,8 @@
   document.addEventListener('visibilitychange', async () => {
     if (armed && document.visibilityState === 'visible') {
       if (wakeLock === null) await requestWakeLock();
-      if (noiseEl && noiseEl.paused && !noiseFading) noiseEl.play().catch(() => {});
+      if (audioCtx && audioCtx.state === 'suspended' && !noiseFading) audioCtx.resume().catch(() => {});
+      if (unlockEl && unlockEl.paused && !noiseFading) unlockEl.play().catch(() => {});
     }
   });
 
