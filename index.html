@@ -199,33 +199,39 @@
     { name: 'Red', h: 4, s: 80 }, { name: 'Green', h: 130, s: 45 },
   ];
   const nsw = document.getElementById('nswatches');
+  function selectNightColor(name) {
+    const idx = nightColors.findIndex(c => c.name.toLowerCase() === String(name).toLowerCase());
+    if (idx < 0) return;
+    const c = nightColors[idx];
+    nsw.querySelectorAll('.swatch').forEach((s, i) => s.classList.toggle('active', i === idx));
+    root.style.setProperty('--nhue', c.h);
+    root.style.setProperty('--nsat', c.s + '%');
+  }
   nightColors.forEach((c, i) => {
     const el = document.createElement('div');
     el.className = 'swatch' + (i === 0 ? ' active' : '');
     el.style.background = `hsl(${c.h}, ${c.s}%, 50%)`;
     el.title = c.name;
-    el.addEventListener('click', () => {
-      nsw.querySelectorAll('.swatch').forEach(s => s.classList.remove('active'));
-      el.classList.add('active');
-      root.style.setProperty('--nhue', c.h);
-      root.style.setProperty('--nsat', c.s + '%');
-    });
+    el.addEventListener('click', () => selectNightColor(c.name));
     nsw.appendChild(el);
   });
 
   const sw = document.getElementById('swatches');
+  function selectWakeColor(name) {
+    const idx = colors.findIndex(c => c.name.toLowerCase() === String(name).toLowerCase());
+    if (idx < 0) return;
+    const c = colors[idx];
+    sw.querySelectorAll('.swatch').forEach((s, i) => s.classList.toggle('active', i === idx));
+    hue = c.h; sat = c.s;
+    root.style.setProperty('--hue', hue);
+    root.style.setProperty('--sat', sat + '%');
+  }
   colors.forEach((c, i) => {
     const el = document.createElement('div');
     el.className = 'swatch' + (i === 0 ? ' active' : '');
     el.style.background = c.s === 0 ? '#f2f2f2' : `hsl(${c.h}, ${c.s}%, 55%)`;
     el.title = c.name;
-    el.addEventListener('click', () => {
-      sw.querySelectorAll('.swatch').forEach(s => s.classList.remove('active'));
-      el.classList.add('active');
-      hue = c.h; sat = c.s;
-      root.style.setProperty('--hue', hue);
-      root.style.setProperty('--sat', sat + '%');
-    });
+    el.addEventListener('click', () => selectWakeColor(c.name));
     sw.appendChild(el);
   });
 
@@ -236,9 +242,10 @@
     return 'Bright';
   }
   function glowOpacity() { return (+glow.value) / 100 * 0.32; }
-  glow.addEventListener('input', () => { glowVal.textContent = glowLabel(+glow.value); });
-
-  fade.addEventListener('input', () => { const v = +fade.value; fadeVal.textContent = v === 0 ? 'Instant' : v + ' min'; });
+  function setGlow(v) { glow.value = v; glowVal.textContent = glowLabel(+glow.value); }
+  function setFade(v) { fade.value = v; const x = +fade.value; fadeVal.textContent = x === 0 ? 'Instant' : x + ' min'; }
+  glow.addEventListener('input', () => setGlow(glow.value));
+  fade.addEventListener('input', () => setFade(fade.value));
 
   // Sleep sound: looping noise synthesized in-browser (no audio file, no dependency)
   const sounds = document.getElementById('sounds');
@@ -247,20 +254,26 @@
   const soundVolRow = document.getElementById('soundVolRow');
   let soundType = 'off';
 
+  function selectSound(name) {
+    const n = String(name).toLowerCase();
+    let ok = false;
+    sounds.querySelectorAll('.pill').forEach(p => {
+      const on = p.textContent.toLowerCase() === n;
+      p.classList.toggle('active', on);
+      if (on) ok = true;
+    });
+    if (ok) { soundType = n; soundVolRow.classList.toggle('disabled', soundType === 'off'); }
+  }
   ['Off', 'White', 'Pink', 'Brown'].forEach((name, i) => {
     const el = document.createElement('div');
     el.className = 'pill' + (i === 0 ? ' active' : '');
     el.textContent = name;
-    el.addEventListener('click', () => {
-      sounds.querySelectorAll('.pill').forEach(p => p.classList.remove('active'));
-      el.classList.add('active');
-      soundType = name.toLowerCase();
-      soundVolRow.classList.toggle('disabled', soundType === 'off');
-    });
+    el.addEventListener('click', () => selectSound(name));
     sounds.appendChild(el);
   });
   soundVolRow.classList.add('disabled');
-  vol.addEventListener('input', () => { volVal.textContent = vol.value + '%'; });
+  function setVol(v) { vol.value = v; volVal.textContent = vol.value + '%'; }
+  vol.addEventListener('input', () => setVol(vol.value));
 
   // Seamless looping via the Web Audio API: AudioBufferSourceNode.loop is sample-accurate
   // (no gap, unlike HTML5 <audio loop> on iOS). A tiny silent media element flips the iOS
@@ -311,11 +324,10 @@
     return URL.createObjectURL(new Blob([view], { type: 'audio/wav' }));
   }
 
-  // Called synchronously inside the Arm tap so iOS allows playback to begin
-  function startNoise() {
-    if (soundType === 'off') return;
+  // Unlock the iOS audio session via a silent media element + resume the context.
+  // Must run inside the Arm tap; called even when sound is off so it can be enabled later.
+  function ensureAudio() {
     try {
-      // Unlock the audio session via a silent media element (bypasses the iOS mute switch)
       if (!unlockEl) {
         unlockUrl = silentWavUrl();
         unlockEl = new Audio(unlockUrl);
@@ -323,11 +335,17 @@
         unlockEl.setAttribute('playsinline', '');
       }
       unlockEl.play().catch(() => {});
-
       if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
       audioCtx.resume();
-      noiseFading = false;
+    } catch (e) {}
+  }
 
+  function startNoise() {
+    if (soundType === 'off') return;
+    ensureAudio();
+    if (!audioCtx) return;
+    try {
+      noiseFading = false;
       const buf = audioCtx.createBuffer(1, Math.floor(audioCtx.sampleRate * 8), audioCtx.sampleRate);
       const d = buf.getChannelData(0);
       fillNoise(d, soundType);
@@ -443,7 +461,8 @@
     if (Number.isNaN(hh)) return;
     targetTs = nextOccurrence(hh, mm);
     armed = true;
-    startNoise(); // must run inside the tap gesture, before any await, for iOS
+    ensureAudio(); // unlock the audio session within the tap gesture, even if sound is off
+    startNoise();  // build the noise source if a sound is selected
     panel.style.display = 'none';
     armedView.classList.add('show');
     light.style.opacity = '0';
@@ -474,6 +493,55 @@
   armBtn.addEventListener('click', arm);
   endBtn.addEventListener('click', disarm);
   tap.addEventListener('click', showBar);
+
+  // Remote config: poll a JSON file in the repo so settings can be changed from a phone.
+  // Edit config.json on github.com; ?key=NAME loads configs/NAME.json instead (separate profiles).
+  const cfgKey = (new URLSearchParams(location.search).get('key') || '').replace(/[^A-Za-z0-9_-]/g, '');
+  const CONFIG_URL = cfgKey ? `configs/${cfgKey}.json` : 'config.json';
+  let lastConfigText = null;
+
+  function applyConfig(cfg) {
+    if (cfg.time && /^\d{1,2}:\d{2}$/.test(cfg.time)) timeInput.value = cfg.time;
+    if (cfg.wakeColor) selectWakeColor(cfg.wakeColor);
+    if (cfg.nightColor) selectNightColor(cfg.nightColor);
+    if (cfg.glow != null) setGlow(Math.max(0, Math.min(100, +cfg.glow)));
+    if (cfg.fade != null) setFade(Math.max(0, Math.min(30, +cfg.fade)));
+    if (cfg.sound) selectSound(cfg.sound);
+    if (cfg.volume != null) setVol(Math.max(0, Math.min(100, +cfg.volume)));
+
+    // Remote arm / disarm
+    if (cfg.arm === true && !armed) { arm(); return; }
+    if (cfg.arm === false && armed) { disarm(); return; }
+
+    // Live update of an already-armed iPad: recompute wake time, refresh visuals, restart sound if still night
+    if (armed) {
+      const [hh, mm] = timeInput.value.split(':').map(Number);
+      if (!Number.isNaN(hh)) targetTs = nextOccurrence(hh, mm);
+      const stillNight = Date.now() < targetTs;
+      if (stillNight) {
+        noiseFading = false;
+        light.style.transition = (+fade.value === 0) ? 'opacity 0.8s linear' : 'none';
+        light.style.opacity = '0';
+      }
+      stopNoise();
+      if (stillNight) { ensureAudio(); startNoise(); }
+      tick();
+    }
+  }
+
+  async function pollConfig() {
+    try {
+      const res = await fetch(`${CONFIG_URL}?t=${Date.now()}`, { cache: 'no-store' });
+      if (!res.ok) return;
+      const text = await res.text();
+      if (text === lastConfigText) return; // only act on an actual change
+      const cfg = JSON.parse(text);
+      lastConfigText = text;
+      applyConfig(cfg);
+    } catch (e) {}
+  }
+  pollConfig();
+  setInterval(pollConfig, 45000);
 })();
 </script>
 </body>

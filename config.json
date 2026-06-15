@@ -1,0 +1,11 @@
+{
+  "_help": "Edit this file from your phone at https://github.com/mtodd78/wake-light (tap config.json, then the pencil icon, change values, Commit). The iPad re-checks every ~45s, even while armed, so changes apply ~1-2 min after you commit. Fields: time 'HH:MM' 24-hour, wakeColor (Purple/Violet/Indigo/Sunrise/Amber/Teal/Rose/White), nightColor (Amber/Yellow/Warm white/Peach/Red/Green), glow 0-100, fade 0-30 minutes, sound (Off/White/Pink/Brown), volume 0-100, arm true/false (true remotely starts the night; false ends it).",
+  "time": "06:30",
+  "wakeColor": "Sunrise",
+  "nightColor": "Amber",
+  "glow": 25,
+  "fade": 12,
+  "sound": "Brown",
+  "volume": 35,
+  "arm": false
+}
